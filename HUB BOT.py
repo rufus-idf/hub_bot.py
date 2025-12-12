@@ -98,41 +98,53 @@ def get_project_map():
     except Exception as e:
         return f"Error reading Master Sheet: {e}"
 
-# --- HELPER: READ TARGET (UPDATED FOR MULTI-TAB) ---
+# --- HELPER: READ EXTERNAL TARGET ---
 def read_target_sheet(url):
-    """
-    Opens the sheet and loops through ALL tabs to gather data.
-    """
+    """Opens an external sheet and reads ALL tabs."""
     try:
         sh = client.open_by_url(url)
         all_content = []
-        
-        # Loop through every tab in the spreadsheet
         for ws in sh.worksheets():
-            # Skip 'Instructions' or 'Admin' tabs if you want
-            if ws.title in ["Instructions", "Admin"]:
-                continue
-                
-            # Read the data (Limit to top 50 rows per tab to prevent crashing)
+            if ws.title in ["Instructions", "Admin"]: continue
             raw_data = ws.get_all_values()
             truncated_data = raw_data[:50]
-            
-            # Label the data so the AI knows which tab it came from
             tab_text = f"--- DATA FROM TAB: '{ws.title}' ---\n{str(truncated_data)}\n"
             all_content.append(tab_text)
-            
-        # Combine all tabs into one big text block
-        full_text = "\n".join(all_content)
-        
-        return full_text, sh.title
+        return "\n".join(all_content), sh.title
     except Exception as e:
         return None, str(e)
+
+# --- HELPER: READ INTERNAL TASKS (NEW) ---
+def read_master_task_tabs():
+    """
+    Opens the MASTER sheet, but skips the Admin/Link/Log tabs.
+    Only reads the tabs that contain Tasks/People.
+    """
+    try:
+        sh = client.open_by_url(MASTER_SHEET_URL)
+        all_content = []
+        
+        # Tabs to IGNORE (System tabs)
+        ignore_list = [LINKS_TAB_NAME, LOGS_TAB_NAME, REF_DATA_TAB_NAME, "Instructions"]
+        
+        for ws in sh.worksheets():
+            if ws.title in ignore_list:
+                continue # Skip the system tabs
+                
+            raw_data = ws.get_all_values()
+            truncated_data = raw_data[:50]
+            tab_text = f"--- INTERNAL TASK LIST: '{ws.title}' ---\n{str(truncated_data)}\n"
+            all_content.append(tab_text)
+            
+        return "\n".join(all_content)
+    except Exception as e:
+        return str(e)
 
 # --- INIT SESSION STATE ---
 if "messages" not in st.session_state:
     st.session_state.messages = load_memory_from_sheet()
 
-# --- SIDEBAR CONTROLS ---
+# --- SIDEBAR ---
 with st.sidebar:
     st.header("⚙️ Memory Controls")
     if st.button("🗑️ Clear Conversation History"):
@@ -146,12 +158,12 @@ for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
-if prompt := st.chat_input("Ask about a project..."):
+if prompt := st.chat_input("Ask about projects or tasks..."):
     st.chat_message("user").markdown(prompt)
     st.session_state.messages.append({"role": "user", "content": prompt})
     save_message_to_sheet("user", prompt)
 
-    with st.spinner("Analyzing all tabs..."):
+    with st.spinner("Analyzing request..."):
         
         # A. GET MAP
         project_map = get_project_map()
@@ -159,14 +171,24 @@ if prompt := st.chat_input("Ask about a project..."):
             st.error(project_map)
             st.stop()
 
-        # B. ROUTING
+        # B. ROUTING (UPDATED LOGIC)
+        # We teach the Router about the "INTERNAL_TASKS" option.
         router_prompt = f"""
         You are a Routing Assistant. 
         USER QUESTION: "{prompt}"
-        MAP: {json.dumps(project_map)}
         
-        Return JSON: {{"url": "...", "reason": "...", "category": "..."}}
-        If no match: {{"url": "None", "reason": "No match"}}
+        OPTION 1: EXTERNAL PROJECT SHEETS (Use the Map below)
+        {json.dumps(project_map)}
+        
+        OPTION 2: INTERNAL TASK LIST
+        If the user asks about "Tasks", "To-Dos", "Schedule", or "What a specific person has to do", 
+        return {{"url": "INTERNAL_TASKS", "reason": "User asked for internal tasks", "category": "Tasks"}}.
+        
+        INSTRUCTIONS:
+        - Return ONLY JSON. 
+        - If matching Option 1, return {{"url": "THE_URL", "reason": "...", "category": "..."}}
+        - If matching Option 2, return {{"url": "INTERNAL_TASKS", "reason": "...", "category": "Tasks"}}
+        - If no match, return {{"url": "None", "reason": "No match"}}
         """
         
         try:
@@ -179,28 +201,40 @@ if prompt := st.chat_input("Ask about a project..."):
 
             target_url = decision.get("url")
             
-            if target_url and target_url != "None":
-                # C. OPEN SHEET (ALL TABS)
+            if target_url == "INTERNAL_TASKS":
+                # --- BRANCH: READ MASTER SHEET TASKS ---
+                sheet_data = read_master_task_tabs()
+                sheet_name = "Master Internal Tasks"
+                
+                final_prompt = f"""
+                Assistant.
+                QUESTION: "{prompt}"
+                
+                DATA (From Internal Task Tabs):
+                {sheet_data}
+                
+                Answer based on the tasks listed above.
+                """
+                final_answer = model.generate_content(final_prompt).text
+
+            elif target_url and target_url != "None":
+                # --- BRANCH: READ EXTERNAL LINK ---
                 sheet_data, sheet_name = read_target_sheet(target_url)
                 
                 if sheet_data:
-                    # D. ANSWER
                     final_prompt = f"""
                     Assistant. 
                     QUESTION: "{prompt}"
-                    
-                    The user asked about a specific project. I have scanned the relevant spreadsheet.
-                    Here is the data from ALL TABS in that sheet:
-                    
+                    DATA (From Linked Sheet '{sheet_name}'): 
                     {sheet_data}
                     
-                    Answer the question accurately based on the data above.
+                    Answer based on data.
                     """
                     final_answer = model.generate_content(final_prompt).text
                 else:
                     final_answer = f"Error opening sheet '{sheet_name}'. Check permissions."
             else:
-                final_answer = "I couldn't find a relevant sheet."
+                final_answer = "I couldn't find a relevant sheet or task list."
 
         except Exception as e:
             final_answer = f"System Error: {e}"
