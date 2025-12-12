@@ -26,7 +26,7 @@ st.markdown("""
 # 2. Setup Gemini
 if "GEMINI_API_KEY" in st.secrets:
     genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
-    model = genai.GenerativeModel('models/gemini-1.5-flash')
+    model = genai.GenerativeModel('models/gemini-2.0-flash')
 else:
     st.error("Missing Gemini API Key in Secrets")
 
