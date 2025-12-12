@@ -3,6 +3,7 @@ import pandas as pd
 import google.generativeai as genai
 import gspread
 import json
+import uuid
 from datetime import datetime
 from google.oauth2.service_account import Credentials
 
