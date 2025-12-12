@@ -17,19 +17,20 @@ MEMORY_SHEET_URL = "https://docs.google.com/spreadsheets/d/1DDxAADCvTUcvKdeTb76g
 LOGS_TAB_NAME = "CHAT_LOGS"
 REF_DATA_TAB_NAME = "Ref_Data"
 
-# 1. Page Config (Force Sidebar to be Expanded)
-st.set_page_config(page_title="Hub Agent", layout="wide", initial_sidebar_state="expanded")
+# 1. Page Config (Aggressive Sidebar Expansion)
+st.set_page_config(page_title="Project Hub", layout="wide", initial_sidebar_state="expanded")
 
+# --- CSS TO FORCE SIDEBAR VISIBILITY ---
 st.markdown("""
     <style>
-        header {visibility: hidden;}
-        footer {visibility: hidden;}
-        .stApp {background-color: transparent;}
-        .block-container {padding-top: 1rem; padding-bottom: 0rem;}
-        /* Better Button Styling */
+        [data-testid="stSidebar"] {
+            min-width: 300px; /* Make it wider */
+        }
+        /* Highlight the New Chat Button */
         div.stButton > button {
             width: 100%;
-            border-radius: 8px;
+            border-radius: 5px;
+            font-weight: bold;
         }
     </style>
 """, unsafe_allow_html=True)
@@ -67,14 +68,17 @@ def get_all_history():
         sh = client.open_by_url(MEMORY_SHEET_URL)
         ws = sh.get_worksheet(0)
         return pd.DataFrame(ws.get_all_records())
-    except:
+    except Exception as e:
+        # If headers are missing or sheet is empty, return empty DF
         return pd.DataFrame()
 
 def load_session_messages(session_id):
     df = get_all_history()
     if df.empty: return []
-    # Filter by Session ID and ensure string comparison
-    session_data = df[df['Session_ID'].astype(str) == str(session_id)]
+    # Ensure Session_ID is treated as string for comparison
+    df['Session_ID'] = df['Session_ID'].astype(str)
+    session_data = df[df['Session_ID'] == str(session_id)]
+    
     messages = []
     for index, row in session_data.iterrows():
         messages.append({"role": row["Role"], "content": row["Content"]})
@@ -93,7 +97,7 @@ def save_message(session_id, role, content):
     except Exception as e:
         print(f"Save failed: {e}")
 
-# --- READ HELPER FUNCTIONS ---
+# --- HELPER FUNCTIONS ---
 def get_project_map():
     try:
         sh = client.open_by_url(MASTER_SHEET_URL)
@@ -131,56 +135,58 @@ def read_master_task_tabs():
     except Exception as e:
         return str(e)
 
-# --- APP LOGIC ---
-
-# 1. Initialize Session
+# --- APP STARTUP ---
 if "session_id" not in st.session_state:
     st.session_state.session_id = str(uuid.uuid4())
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-# --- LAYOUT: SIDEBAR HISTORY ---
+# --- SIDEBAR UI (THE CRITICAL PART) ---
 with st.sidebar:
-    st.header("🗂️ Chat History")
+    st.title("🗂️ Menu")
     
-    # NEW CHAT BUTTON (Primary Color)
-    if st.button("➕ Start New Chat", type="primary", key="new_chat_sidebar"):
+    # 1. NEW CHAT BUTTON (Big and Red)
+    if st.button("➕ START NEW CHAT", type="primary"):
         st.session_state.session_id = str(uuid.uuid4())
         st.session_state.messages = []
         st.rerun()
-        
+    
     st.divider()
+    st.subheader("Previous Chats")
 
-    # HISTORY LIST
-    df_history = get_all_history()
+    # 2. LOAD HISTORY
+    with st.spinner("Loading history..."):
+        df_history = get_all_history()
+
     if not df_history.empty and 'Session_ID' in df_history.columns:
         # Group by Session ID to get unique sessions
         unique_sessions = df_history[['Session_ID', 'Timestamp']].drop_duplicates(subset=['Session_ID'])
-        # Sort by latest first
+        # Sort by latest
         unique_sessions = unique_sessions.sort_values(by='Timestamp', ascending=False)
         
-        for index, row in unique_sessions.iterrows():
+        # Limit to last 10 sessions to keep it clean
+        for index, row in unique_sessions.head(10).iterrows():
             sid = row['Session_ID']
             ts = row['Timestamp']
             
-            # Simple button for each session
+            # Button for each session
             if st.button(f"📅 {ts}", key=sid):
                 st.session_state.session_id = sid
                 st.session_state.messages = load_session_messages(sid)
                 st.rerun()
+    else:
+        st.info("No history found yet.")
 
-# --- MAIN CHAT INTERFACE ---
+# --- MAIN CHAT UI ---
 st.title("🤖 Project Hub")
-
-# Show current session ID (Optional debug, verify it changes on 'New Chat')
-# st.caption(f"Session ID: {st.session_state.session_id}")
 
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
 if prompt := st.chat_input("Ask about projects, prices, or tasks..."):
+    # Save & Show User Msg
     st.chat_message("user").markdown(prompt)
     st.session_state.messages.append({"role": "user", "content": prompt})
     save_message(st.session_state.session_id, "user", prompt)
@@ -226,6 +232,7 @@ if prompt := st.chat_input("Ask about projects, prices, or tasks..."):
         except Exception as e:
             final_answer = f"System Error: {e}"
 
+        # Save & Show AI Msg
         st.chat_message("assistant").markdown(final_answer)
         st.session_state.messages.append({"role": "assistant", "content": final_answer})
         save_message(st.session_state.session_id, "assistant", final_answer)
