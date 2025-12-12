@@ -13,6 +13,8 @@ LINKS_TAB_NAME = "AI_LINKS"
 
 # 2. Your NEW Memory Sheet URL (The Database)
 MEMORY_SHEET_URL = "https://docs.google.com/spreadsheets/d/1DDxAADCvTUcvKdeTb76giFBLIa3Yb1XOeGievJ_cung/edit"
+LOGS_TAB_NAME = "CHAT_LOGS"
+REF_DATA_TAB_NAME = "Ref_Data"
 
 # 1. Page Config
 st.set_page_config(page_title="Hub Agent", layout="wide")
