@@ -17,20 +17,19 @@ MEMORY_SHEET_URL = "https://docs.google.com/spreadsheets/d/1DDxAADCvTUcvKdeTb76g
 LOGS_TAB_NAME = "CHAT_LOGS"
 REF_DATA_TAB_NAME = "Ref_Data"
 
-# 1. Page Config
-st.set_page_config(page_title="Hub Agent", layout="wide")
+# 1. Page Config (Force Sidebar to be Expanded)
+st.set_page_config(page_title="Hub Agent", layout="wide", initial_sidebar_state="expanded")
+
 st.markdown("""
     <style>
         header {visibility: hidden;}
         footer {visibility: hidden;}
         .stApp {background-color: transparent;}
-        .block-container {padding-top: 0rem; padding-bottom: 0rem;}
-        /* Make sidebar buttons look like chat history items */
-        .stButton button {
+        .block-container {padding-top: 1rem; padding-bottom: 0rem;}
+        /* Better Button Styling */
+        div.stButton > button {
             width: 100%;
-            text-align: left;
-            border: none;
-            background: transparent;
+            border-radius: 8px;
         }
     </style>
 """, unsafe_allow_html=True)
@@ -64,7 +63,6 @@ else:
 
 # --- DATABASE FUNCTIONS ---
 def get_all_history():
-    """Reads entire sheet to find unique sessions."""
     try:
         sh = client.open_by_url(MEMORY_SHEET_URL)
         ws = sh.get_worksheet(0)
@@ -73,18 +71,16 @@ def get_all_history():
         return pd.DataFrame()
 
 def load_session_messages(session_id):
-    """Loads specific messages for one session ID."""
     df = get_all_history()
     if df.empty: return []
-    # Filter by Session ID
-    session_data = df[df['Session_ID'] == str(session_id)]
+    # Filter by Session ID and ensure string comparison
+    session_data = df[df['Session_ID'].astype(str) == str(session_id)]
     messages = []
     for index, row in session_data.iterrows():
         messages.append({"role": row["Role"], "content": row["Content"]})
     return messages
 
 def save_message(session_id, role, content):
-    """Saves message with the specific Session ID."""
     try:
         sh = client.open_by_url(MEMORY_SHEET_URL)
         ws = sh.get_worksheet(0)
@@ -95,9 +91,9 @@ def save_message(session_id, role, content):
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         ws.append_row([str(session_id), role, content, timestamp])
     except Exception as e:
-        st.error(f"Save failed: {e}")
+        print(f"Save failed: {e}")
 
-# --- HELPER FUNCTIONS (Routing & Reading) ---
+# --- READ HELPER FUNCTIONS ---
 def get_project_map():
     try:
         sh = client.open_by_url(MASTER_SHEET_URL)
@@ -137,57 +133,59 @@ def read_master_task_tabs():
 
 # --- APP LOGIC ---
 
-# 1. Initialize Session ID
+# 1. Initialize Session
 if "session_id" not in st.session_state:
-    st.session_state.session_id = str(uuid.uuid4()) # Generate random ID for new user
+    st.session_state.session_id = str(uuid.uuid4())
 
-# 2. Initialize Messages for that ID
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-# --- SIDEBAR: HISTORY LIST ---
+# --- LAYOUT: SIDEBAR HISTORY ---
 with st.sidebar:
-    st.title("💬 Chats")
+    st.header("🗂️ Chat History")
     
-    # NEW CHAT BUTTON
-    if st.button("➕ Start New Chat", type="primary"):
+    # NEW CHAT BUTTON (Primary Color)
+    if st.button("➕ Start New Chat", type="primary", key="new_chat_sidebar"):
         st.session_state.session_id = str(uuid.uuid4())
         st.session_state.messages = []
         st.rerun()
-
+        
     st.divider()
-    st.caption("History")
 
-    # Load all history to find past sessions
+    # HISTORY LIST
     df_history = get_all_history()
     if not df_history.empty and 'Session_ID' in df_history.columns:
-        # Get unique sessions (reverse order to show newest first)
-        unique_sessions = df_history[['Session_ID', 'Timestamp']].drop_duplicates(subset=['Session_ID']).sort_values(by='Timestamp', ascending=False)
+        # Group by Session ID to get unique sessions
+        unique_sessions = df_history[['Session_ID', 'Timestamp']].drop_duplicates(subset=['Session_ID'])
+        # Sort by latest first
+        unique_sessions = unique_sessions.sort_values(by='Timestamp', ascending=False)
         
         for index, row in unique_sessions.iterrows():
             sid = row['Session_ID']
-            time_label = row['Timestamp']
+            ts = row['Timestamp']
             
-            # Create a button for each past session
-            # Use the timestamp as the label (or first few words of first message if we wanted to be fancy)
-            if st.button(f"📅 {time_label}", key=sid):
+            # Simple button for each session
+            if st.button(f"📅 {ts}", key=sid):
                 st.session_state.session_id = sid
                 st.session_state.messages = load_session_messages(sid)
                 st.rerun()
 
 # --- MAIN CHAT INTERFACE ---
+st.title("🤖 Project Hub")
+
+# Show current session ID (Optional debug, verify it changes on 'New Chat')
+# st.caption(f"Session ID: {st.session_state.session_id}")
 
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
-if prompt := st.chat_input("Ask about projects or tasks..."):
-    # 1. Update UI & Save User Msg
+if prompt := st.chat_input("Ask about projects, prices, or tasks..."):
     st.chat_message("user").markdown(prompt)
     st.session_state.messages.append({"role": "user", "content": prompt})
     save_message(st.session_state.session_id, "user", prompt)
 
-    with st.spinner("Thinking..."):
+    with st.spinner("Processing..."):
         # A. MAP
         project_map = get_project_map()
         
@@ -196,23 +194,19 @@ if prompt := st.chat_input("Ask about projects or tasks..."):
         You are a Routing Assistant. 
         USER QUESTION: "{prompt}"
         
-        OPTION 1: EXTERNAL PROJECT SHEETS (Map below)
+        OPTION 1: EXTERNAL SHEETS
         {json.dumps(project_map)}
         
-        OPTION 2: INTERNAL TASK LIST
-        If asking about "Tasks", "To-Dos", "Schedule", or "What a specific person has to do", 
-        return {{"url": "INTERNAL_TASKS", "reason": "Internal tasks", "category": "Tasks"}}.
+        OPTION 2: INTERNAL TASKS
+        If asking about "Tasks", "Schedule", "People", return {{"url": "INTERNAL_TASKS", "reason": "Task request", "category": "Tasks"}}
         
-        INSTRUCTIONS:
-        - Return ONLY JSON. 
-        - If Option 1: {{"url": "THE_URL", "reason": "...", "category": "..."}}
-        - If Option 2: {{"url": "INTERNAL_TASKS", "reason": "...", "category": "Tasks"}}
-        - If No Match: {{"url": "None", "reason": "No match"}}
+        Return JSON.
         """
         
         try:
             router_response = model.generate_content(router_prompt)
-            decision = json.loads(router_response.text.strip().replace("```json", "").replace("```", ""))
+            clean_json = router_response.text.strip().replace("```json", "").replace("```", "")
+            decision = json.loads(clean_json)
             
             target_url = decision.get("url")
             
@@ -223,19 +217,18 @@ if prompt := st.chat_input("Ask about projects or tasks..."):
             elif target_url and target_url != "None":
                 sheet_data, sheet_name = read_target_sheet(target_url)
                 if sheet_data:
-                    final_answer = model.generate_content(f"Answer using data from {sheet_name}:\n{sheet_data}\nQuestion: {prompt}").text
+                    final_answer = model.generate_content(f"Answer using {sheet_name}:\n{sheet_data}\nQuestion: {prompt}").text
                 else:
                     final_answer = f"Error opening sheet '{sheet_name}'."
             else:
-                final_answer = "I couldn't find a relevant sheet or task list."
+                final_answer = "I couldn't find a relevant sheet."
 
         except Exception as e:
             final_answer = f"System Error: {e}"
 
-        # 2. Update UI & Save AI Msg
         st.chat_message("assistant").markdown(final_answer)
         st.session_state.messages.append({"role": "assistant", "content": final_answer})
         save_message(st.session_state.session_id, "assistant", final_answer)
         
-        # Rerun to update the sidebar history list immediately
+        # RERUN to refresh the sidebar history immediately
         st.rerun()
