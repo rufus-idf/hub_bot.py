@@ -1,0 +1,6 @@
+streamlit
+pandas
+google-generativeai>=0.7.2
+gspread
+google-auth
+streamlit-gsheets
