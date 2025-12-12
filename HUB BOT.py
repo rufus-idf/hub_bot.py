@@ -52,15 +52,12 @@ if "connections" in st.secrets and "gsheets" in st.secrets["connections"]:
 else:
     st.error("Secrets not configured correctly.")
 
-# --- DATABASE FUNCTIONS (The Memory) ---
+# --- DATABASE FUNCTIONS ---
 def load_memory_from_sheet():
-    """Reads the Memory Sheet and puts it into Session State"""
     try:
         sh = client.open_by_url(MEMORY_SHEET_URL)
         ws = sh.get_worksheet(0)
-        records = ws.get_all_records() # Expects headers: Role, Content, Timestamp
-        
-        # Convert to Streamlit format
+        records = ws.get_all_records()
         messages = []
         for r in records:
             messages.append({"role": r["Role"], "content": r["Content"]})
@@ -69,29 +66,24 @@ def load_memory_from_sheet():
         return []
 
 def save_message_to_sheet(role, content):
-    """Appends a single new message to the sheet"""
     try:
         sh = client.open_by_url(MEMORY_SHEET_URL)
         ws = sh.get_worksheet(0)
-        
-        # Check if headers exist, if not create them
         if ws.row_count > 0:
             val = ws.acell('A1').value
             if not val:
                  ws.append_row(["Role", "Content", "Timestamp"])
-        
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         ws.append_row([role, content, timestamp])
     except Exception as e:
         st.error(f"Failed to save memory: {e}")
 
 def clear_memory_sheet():
-    """Wipes the sheet clean"""
     try:
         sh = client.open_by_url(MEMORY_SHEET_URL)
         ws = sh.get_worksheet(0)
         ws.clear()
-        ws.append_row(["Role", "Content", "Timestamp"]) # Re-add headers
+        ws.append_row(["Role", "Content", "Timestamp"])
         return True
     except Exception as e:
         st.error(f"Failed to clear memory: {e}")
@@ -106,19 +98,38 @@ def get_project_map():
     except Exception as e:
         return f"Error reading Master Sheet: {e}"
 
-# --- HELPER: READ TARGET ---
+# --- HELPER: READ TARGET (UPDATED FOR MULTI-TAB) ---
 def read_target_sheet(url):
+    """
+    Opens the sheet and loops through ALL tabs to gather data.
+    """
     try:
         sh = client.open_by_url(url)
-        ws = sh.get_worksheet(0)
-        raw_data = ws.get_all_values()
-        return raw_data[:100], sh.title
+        all_content = []
+        
+        # Loop through every tab in the spreadsheet
+        for ws in sh.worksheets():
+            # Skip 'Instructions' or 'Admin' tabs if you want
+            if ws.title in ["Instructions", "Admin"]:
+                continue
+                
+            # Read the data (Limit to top 50 rows per tab to prevent crashing)
+            raw_data = ws.get_all_values()
+            truncated_data = raw_data[:50]
+            
+            # Label the data so the AI knows which tab it came from
+            tab_text = f"--- DATA FROM TAB: '{ws.title}' ---\n{str(truncated_data)}\n"
+            all_content.append(tab_text)
+            
+        # Combine all tabs into one big text block
+        full_text = "\n".join(all_content)
+        
+        return full_text, sh.title
     except Exception as e:
         return None, str(e)
 
 # --- INIT SESSION STATE ---
 if "messages" not in st.session_state:
-    # On first load, grab history from the sheet
     st.session_state.messages = load_memory_from_sheet()
 
 # --- SIDEBAR CONTROLS ---
@@ -136,12 +147,11 @@ for message in st.session_state.messages:
         st.markdown(message["content"])
 
 if prompt := st.chat_input("Ask about a project..."):
-    # 1. Show User Message
     st.chat_message("user").markdown(prompt)
     st.session_state.messages.append({"role": "user", "content": prompt})
-    save_message_to_sheet("user", prompt) # Save to DB
+    save_message_to_sheet("user", prompt)
 
-    with st.spinner("Thinking..."):
+    with st.spinner("Analyzing all tabs..."):
         
         # A. GET MAP
         project_map = get_project_map()
@@ -170,7 +180,7 @@ if prompt := st.chat_input("Ask about a project..."):
             target_url = decision.get("url")
             
             if target_url and target_url != "None":
-                # C. OPEN SHEET
+                # C. OPEN SHEET (ALL TABS)
                 sheet_data, sheet_name = read_target_sheet(target_url)
                 
                 if sheet_data:
@@ -178,8 +188,13 @@ if prompt := st.chat_input("Ask about a project..."):
                     final_prompt = f"""
                     Assistant. 
                     QUESTION: "{prompt}"
-                    DATA ({sheet_name}): {sheet_data}
-                    Answer based on data.
+                    
+                    The user asked about a specific project. I have scanned the relevant spreadsheet.
+                    Here is the data from ALL TABS in that sheet:
+                    
+                    {sheet_data}
+                    
+                    Answer the question accurately based on the data above.
                     """
                     final_answer = model.generate_content(final_prompt).text
                 else:
@@ -190,7 +205,6 @@ if prompt := st.chat_input("Ask about a project..."):
         except Exception as e:
             final_answer = f"System Error: {e}"
 
-        # 2. Show AI Message
         st.chat_message("assistant").markdown(final_answer)
         st.session_state.messages.append({"role": "assistant", "content": final_answer})
-        save_message_to_sheet("assistant", final_answer) # Save to DB
+        save_message_to_sheet("assistant", final_answer)
