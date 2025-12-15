@@ -17,21 +17,14 @@ MEMORY_SHEET_URL = "https://docs.google.com/spreadsheets/d/1DDxAADCvTUcvKdeTb76g
 LOGS_TAB_NAME = "CHAT_LOGS"
 REF_DATA_TAB_NAME = "Ref_Data"
 
-# 1. Page Config (Aggressive Sidebar Expansion)
+# 1. Page Config
 st.set_page_config(page_title="Project Hub", layout="wide", initial_sidebar_state="expanded")
 
 # --- CSS TO FORCE SIDEBAR VISIBILITY ---
 st.markdown("""
     <style>
-        [data-testid="stSidebar"] {
-            min-width: 300px; /* Make it wider */
-        }
-        /* Highlight the New Chat Button */
-        div.stButton > button {
-            width: 100%;
-            border-radius: 5px;
-            font-weight: bold;
-        }
+        [data-testid="stSidebar"] { min-width: 300px; }
+        div.stButton > button { width: 100%; border-radius: 5px; font-weight: bold; }
     </style>
 """, unsafe_allow_html=True)
 
@@ -68,17 +61,14 @@ def get_all_history():
         sh = client.open_by_url(MEMORY_SHEET_URL)
         ws = sh.get_worksheet(0)
         return pd.DataFrame(ws.get_all_records())
-    except Exception as e:
-        # If headers are missing or sheet is empty, return empty DF
+    except:
         return pd.DataFrame()
 
 def load_session_messages(session_id):
     df = get_all_history()
     if df.empty: return []
-    # Ensure Session_ID is treated as string for comparison
     df['Session_ID'] = df['Session_ID'].astype(str)
     session_data = df[df['Session_ID'] == str(session_id)]
-    
     messages = []
     for index, row in session_data.iterrows():
         messages.append({"role": row["Role"], "content": row["Content"]})
@@ -112,9 +102,11 @@ def read_target_sheet(url):
         all_content = []
         for ws in sh.worksheets():
             if ws.title in ["Instructions", "Admin"]: continue
+            # Get data as list of lists (cleaner than value objects)
             raw_data = ws.get_all_values()
-            truncated_data = raw_data[:50]
-            tab_text = f"--- DATA FROM TAB: '{ws.title}' ---\n{str(truncated_data)}\n"
+            # Read first 100 rows to ensure we catch the item
+            truncated_data = raw_data[:100]
+            tab_text = f"--- TAB: '{ws.title}' ---\n{str(truncated_data)}\n"
             all_content.append(tab_text)
         return "\n".join(all_content), sh.title
     except Exception as e:
@@ -128,8 +120,8 @@ def read_master_task_tabs():
         for ws in sh.worksheets():
             if ws.title in ignore_list: continue
             raw_data = ws.get_all_values()
-            truncated_data = raw_data[:50]
-            tab_text = f"--- INTERNAL TASK LIST: '{ws.title}' ---\n{str(truncated_data)}\n"
+            truncated_data = raw_data[:100]
+            tab_text = f"--- INTERNAL TASKS: '{ws.title}' ---\n{str(truncated_data)}\n"
             all_content.append(tab_text)
         return "\n".join(all_content)
     except Exception as e:
@@ -142,41 +134,28 @@ if "session_id" not in st.session_state:
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-# --- SIDEBAR UI (THE CRITICAL PART) ---
+# --- SIDEBAR UI ---
 with st.sidebar:
     st.title("🗂️ Menu")
-    
-    # 1. NEW CHAT BUTTON (Big and Red)
     if st.button("➕ START NEW CHAT", type="primary"):
         st.session_state.session_id = str(uuid.uuid4())
         st.session_state.messages = []
         st.rerun()
-    
     st.divider()
-    st.subheader("Previous Chats")
-
-    # 2. LOAD HISTORY
+    
     with st.spinner("Loading history..."):
         df_history = get_all_history()
 
     if not df_history.empty and 'Session_ID' in df_history.columns:
-        # Group by Session ID to get unique sessions
         unique_sessions = df_history[['Session_ID', 'Timestamp']].drop_duplicates(subset=['Session_ID'])
-        # Sort by latest
         unique_sessions = unique_sessions.sort_values(by='Timestamp', ascending=False)
-        
-        # Limit to last 10 sessions to keep it clean
         for index, row in unique_sessions.head(10).iterrows():
             sid = row['Session_ID']
             ts = row['Timestamp']
-            
-            # Button for each session
             if st.button(f"📅 {ts}", key=sid):
                 st.session_state.session_id = sid
                 st.session_state.messages = load_session_messages(sid)
                 st.rerun()
-    else:
-        st.info("No history found yet.")
 
 # --- MAIN CHAT UI ---
 st.title("🤖 Project Hub")
@@ -186,16 +165,13 @@ for message in st.session_state.messages:
         st.markdown(message["content"])
 
 if prompt := st.chat_input("Ask about projects, prices, or tasks..."):
-    # Save & Show User Msg
     st.chat_message("user").markdown(prompt)
     st.session_state.messages.append({"role": "user", "content": prompt})
     save_message(st.session_state.session_id, "user", prompt)
 
     with st.spinner("Processing..."):
-        # A. MAP
         project_map = get_project_map()
         
-        # B. ROUTER
         router_prompt = f"""
         You are a Routing Assistant. 
         USER QUESTION: "{prompt}"
@@ -218,12 +194,35 @@ if prompt := st.chat_input("Ask about projects, prices, or tasks..."):
             
             if target_url == "INTERNAL_TASKS":
                 sheet_data = read_master_task_tabs()
-                final_answer = model.generate_content(f"Answer using Internal Tasks:\n{sheet_data}\nQuestion: {prompt}").text
+                # --- PROMPT UPDATE 1: FORBID PYTHON CODE ---
+                final_prompt = f"""
+                You are a helpful assistant. 
+                DO NOT WRITE PYTHON CODE.
+                Read the text data below and answer the question in plain text.
+                
+                DATA (Internal Tasks):
+                {sheet_data}
+                
+                QUESTION: {prompt}
+                """
+                final_answer = model.generate_content(final_prompt).text
 
             elif target_url and target_url != "None":
                 sheet_data, sheet_name = read_target_sheet(target_url)
                 if sheet_data:
-                    final_answer = model.generate_content(f"Answer using {sheet_name}:\n{sheet_data}\nQuestion: {prompt}").text
+                    # --- PROMPT UPDATE 2: FORBID PYTHON CODE ---
+                    final_prompt = f"""
+                    You are a helpful assistant.
+                    DO NOT WRITE PYTHON CODE. 
+                    The data below is raw text from a spreadsheet.
+                    Scan the text visually, find the item matching the user's request, and extract the answer.
+                    
+                    DATA (From '{sheet_name}'):
+                    {sheet_data}
+                    
+                    QUESTION: {prompt}
+                    """
+                    final_answer = model.generate_content(final_prompt).text
                 else:
                     final_answer = f"Error opening sheet '{sheet_name}'."
             else:
@@ -232,10 +231,7 @@ if prompt := st.chat_input("Ask about projects, prices, or tasks..."):
         except Exception as e:
             final_answer = f"System Error: {e}"
 
-        # Save & Show AI Msg
         st.chat_message("assistant").markdown(final_answer)
         st.session_state.messages.append({"role": "assistant", "content": final_answer})
         save_message(st.session_state.session_id, "assistant", final_answer)
-        
-        # RERUN to refresh the sidebar history immediately
         st.rerun()
