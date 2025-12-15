@@ -89,7 +89,7 @@ def save_message(session_id, role, content):
 
 # --- HELPER FUNCTIONS ---
 
-@st.cache_data(ttl=600)  # <--- FIXED: The decorator sits cleanly on top now
+@st.cache_data(ttl=600)
 def get_project_map():
     try:
         sh = client.open_by_url(MASTER_SHEET_URL)
@@ -128,6 +128,16 @@ def read_master_task_tabs():
         return "\n".join(all_content)
     except Exception as e:
         return str(e)
+
+def get_recent_context():
+    """Extracts the last 3 messages to help the bot understand 'follow-up' questions."""
+    if "messages" not in st.session_state: return ""
+    # Slice the last 3 messages (excluding the current one which is just being added)
+    history = st.session_state.messages[:-1][-3:] 
+    context_text = ""
+    for msg in history:
+        context_text += f"{msg['role'].upper()}: {msg['content']}\n"
+    return context_text
 
 # --- APP STARTUP ---
 if "session_id" not in st.session_state:
@@ -173,16 +183,25 @@ if prompt := st.chat_input("Ask about projects, prices, or tasks..."):
 
     with st.spinner("Processing..."):
         project_map = get_project_map()
+        chat_context = get_recent_context() # <--- NEW: Grab history
         
+        # --- ROUTER WITH MEMORY ---
         router_prompt = f"""
         You are a Routing Assistant. 
-        USER QUESTION: "{prompt}"
+        
+        CONTEXT (Previous Conversation):
+        {chat_context}
+        
+        CURRENT USER QUESTION: "{prompt}"
         
         OPTION 1: EXTERNAL SHEETS
         {json.dumps(project_map)}
         
         OPTION 2: INTERNAL TASKS
         If asking about "Tasks", "Schedule", "People", return {{"url": "INTERNAL_TASKS", "reason": "Task request", "category": "Tasks"}}
+        
+        INSTRUCTION:
+        If the Current Question is vague (e.g., "How much more?", "What about that?"), use the CONTEXT to decide which sheet relates to the previous topic.
         
         Return JSON.
         """
@@ -196,11 +215,12 @@ if prompt := st.chat_input("Ask about projects, prices, or tasks..."):
             
             if target_url == "INTERNAL_TASKS":
                 sheet_data = read_master_task_tabs()
-                # --- PROMPT UPDATE 1: FORBID PYTHON CODE ---
                 final_prompt = f"""
                 You are a helpful assistant. 
                 DO NOT WRITE PYTHON CODE.
-                Read the text data below and answer the question in plain text.
+                
+                CONTEXT:
+                {chat_context}
                 
                 DATA (Internal Tasks):
                 {sheet_data}
@@ -212,17 +232,18 @@ if prompt := st.chat_input("Ask about projects, prices, or tasks..."):
             elif target_url and target_url != "None":
                 sheet_data, sheet_name = read_target_sheet(target_url)
                 if sheet_data:
-                    # --- PROMPT UPDATE 2: FORBID PYTHON CODE + CITATIONS ---
                     final_prompt = f"""
                     You are a helpful assistant.
-                   INSTRUCTIONS:
+                    
+                    INSTRUCTIONS:
                     1. Read the spreadsheet data below.
                     2. DO NOT write python code.
                     3. If the user asks for a calculation (e.g., "Do we have enough?"), YOU MUST DO THE MATH YOURSELF based on the numbers provided in the text.
                        - Compare 'Stock Counts' vs 'Project Requirements'.
-                       - Subtract requirements from stock to find the answer.
+                    4. Use the CONTEXT below to understand vague follow-up questions.
                     
-                    4. Cite your source (e.g., "Source: 'Prices' Tab, Row 14").
+                    CONTEXT (Previous Chat):
+                    {chat_context}
                     
                     DATA (From '{sheet_name}'):
                     {sheet_data}
@@ -233,7 +254,7 @@ if prompt := st.chat_input("Ask about projects, prices, or tasks..."):
                 else:
                     final_answer = f"Error opening sheet '{sheet_name}'."
             else:
-                final_answer = "I couldn't find a relevant sheet."
+                final_answer = "I couldn't find a relevant sheet. Try mentioning the project or item name again."
 
         except Exception as e:
             final_answer = f"System Error: {e}"
