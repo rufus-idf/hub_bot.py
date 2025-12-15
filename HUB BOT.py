@@ -89,6 +89,8 @@ def save_message(session_id, role, content):
 
 # --- HELPER FUNCTIONS ---
 def get_project_map():
+    @st.cache_data(ttl=600)  # ttl=600 means "remember this for 600 seconds (10 mins)"
+def get_project_map():
     try:
         sh = client.open_by_url(MASTER_SHEET_URL)
         ws = sh.worksheet(LINKS_TAB_NAME)
@@ -216,6 +218,10 @@ if prompt := st.chat_input("Ask about projects, prices, or tasks..."):
                     DO NOT WRITE PYTHON CODE. 
                     The data below is raw text from a spreadsheet.
                     Scan the text visually, find the item matching the user's request, and extract the answer.
+                    
+CRITICAL INSTRUCTION:
+After giving the answer, you MUST cite your source in brackets.
+Example: "The price is £50 (Source: 'Prices' Tab, Row 14)"
                     
                     DATA (From '{sheet_name}'):
                     {sheet_data}
