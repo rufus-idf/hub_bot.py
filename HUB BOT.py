@@ -215,13 +215,14 @@ if prompt := st.chat_input("Ask about projects, prices, or tasks..."):
                     # --- PROMPT UPDATE 2: FORBID PYTHON CODE + CITATIONS ---
                     final_prompt = f"""
                     You are a helpful assistant.
-                    DO NOT WRITE PYTHON CODE. 
-                    The data below is raw text from a spreadsheet.
-                    Scan the text visually, find the item matching the user's request, and extract the answer.
+                   INSTRUCTIONS:
+                    1. Read the spreadsheet data below.
+                    2. DO NOT write python code.
+                    3. If the user asks for a calculation (e.g., "Do we have enough?"), YOU MUST DO THE MATH YOURSELF based on the numbers provided in the text.
+                       - Compare 'Stock Counts' vs 'Project Requirements'.
+                       - Subtract requirements from stock to find the answer.
                     
-                    CRITICAL INSTRUCTION:
-                    After giving the answer, you MUST cite your source in brackets.
-                    Example: "The price is £50 (Source: 'Prices' Tab, Row 14)"
+                    4. Cite your source (e.g., "Source: 'Prices' Tab, Row 14").
                     
                     DATA (From '{sheet_name}'):
                     {sheet_data}
