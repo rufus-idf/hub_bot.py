@@ -20,7 +20,7 @@ REF_DATA_TAB_NAME = "Ref_Data"
 # 1. Page Config
 st.set_page_config(page_title="Project Hub", layout="wide", initial_sidebar_state="expanded")
 
-# --- CSS TO FORCE SIDEBAR VISIBILITY ---
+# --- CSS ---
 st.markdown("""
     <style>
         [data-testid="stSidebar"] { min-width: 300px; }
@@ -96,29 +96,27 @@ def get_project_map():
         ws = sh.worksheet(LINKS_TAB_NAME)
         return ws.get_all_records()
     except Exception as e:
-        return f"Error: {e}"
+        return []
 
-def read_target_sheet(url):
+def read_target_sheet(url, sheet_title_hint="Sheet"):
     try:
         sh = client.open_by_url(url)
         all_content = []
         for ws in sh.worksheets():
             if ws.title in ["Instructions", "Admin"]: continue
-            # Get data as list of lists (cleaner than value objects)
             raw_data = ws.get_all_values()
-            # Read first 500 rows to ensure we catch the item (Increased limit)
-            truncated_data = raw_data[:500]
-            tab_text = f"--- TAB: '{ws.title}' ---\n{str(truncated_data)}\n"
+            truncated_data = raw_data[:300] # Read 300 rows per tab
+            tab_text = f"--- DATA FROM '{sheet_title_hint}' (Tab: {ws.title}) ---\n{str(truncated_data)}\n"
             all_content.append(tab_text)
-        return "\n".join(all_content), sh.title
+        return "\n".join(all_content)
     except Exception as e:
-        return None, str(e)
+        return f"Error reading {sheet_title_hint}: {e}"
 
 def read_master_task_tabs():
     try:
         sh = client.open_by_url(MASTER_SHEET_URL)
         all_content = []
-        ignore_list = [LINKS_TAB_NAME, LOGS_TAB_NAME, REF_DATA_TAB_NAME, "Instructions"]
+        ignore_list = [LINKS_TAB_NAME, LOGS_TAB_NAME, "Ref_Data", "Instructions"]
         for ws in sh.worksheets():
             if ws.title in ignore_list: continue
             raw_data = ws.get_all_values()
@@ -130,14 +128,27 @@ def read_master_task_tabs():
         return str(e)
 
 def get_recent_context():
-    """Extracts the last 3 messages to help the bot understand 'follow-up' questions."""
     if "messages" not in st.session_state: return ""
-    # Slice the last 3 messages (excluding the current one which is just being added)
-    history = st.session_state.messages[:-1][-3:] 
+    history = st.session_state.messages[:-1][-3:]
     context_text = ""
     for msg in history:
         context_text += f"{msg['role'].upper()}: {msg['content']}\n"
     return context_text
+
+def identify_project_in_prompt(prompt, project_map):
+    """Finds if a project name exists in the user prompt."""
+    prompt_lower = prompt.lower()
+    
+    # Extract unique project names
+    if isinstance(project_map, list):
+        # Filter out the Inventory Project so it's not detected as a 'Job'
+        project_names = set(row['Project Name'] for row in project_map if row['Project Name'] != INVENTORY_PROJECT_NAME)
+        
+        # Sort by length descending to catch "Project A Part 2" before "Project A"
+        for name in sorted(project_names, key=len, reverse=True):
+            if name.lower() in prompt_lower:
+                return name
+    return None
 
 # --- APP STARTUP ---
 if "session_id" not in st.session_state:
@@ -146,7 +157,7 @@ if "session_id" not in st.session_state:
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-# --- SIDEBAR UI ---
+# --- SIDEBAR ---
 with st.sidebar:
     st.title("🗂️ Menu")
     if st.button("➕ START NEW CHAT", type="primary"):
@@ -159,8 +170,7 @@ with st.sidebar:
         df_history = get_all_history()
 
     if not df_history.empty and 'Session_ID' in df_history.columns:
-        unique_sessions = df_history[['Session_ID', 'Timestamp']].drop_duplicates(subset=['Session_ID'])
-        unique_sessions = unique_sessions.sort_values(by='Timestamp', ascending=False)
+        unique_sessions = df_history[['Session_ID', 'Timestamp']].drop_duplicates(subset=['Session_ID']).sort_values(by='Timestamp', ascending=False)
         for index, row in unique_sessions.head(10).iterrows():
             sid = row['Session_ID']
             ts = row['Timestamp']
@@ -169,95 +179,112 @@ with st.sidebar:
                 st.session_state.messages = load_session_messages(sid)
                 st.rerun()
 
-# --- MAIN CHAT UI ---
+# --- MAIN CHAT ---
 st.title("🤖 Project Hub")
 
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
-if prompt := st.chat_input("Ask about projects, prices, or tasks..."):
+if prompt := st.chat_input("Ask about projects, estimation, or tasks..."):
     st.chat_message("user").markdown(prompt)
     st.session_state.messages.append({"role": "user", "content": prompt})
     save_message(st.session_state.session_id, "user", prompt)
 
-    with st.spinner("Processing..."):
+    with st.spinner("Analyzing multiple data sources..."):
         project_map = get_project_map()
-        chat_context = get_recent_context() # <--- NEW: Grab history
+        chat_context = get_recent_context()
         
-        # --- ROUTER WITH MEMORY ---
-        router_prompt = f"""
-        You are a Routing Assistant. 
+        # 1. DETECT PROJECT
+        detected_project = identify_project_in_prompt(prompt, project_map)
         
-        CONTEXT (Previous Conversation):
-        {chat_context}
+        final_answer = ""
         
-        CURRENT USER QUESTION: "{prompt}"
-        
-        OPTION 1: EXTERNAL SHEETS
-        {json.dumps(project_map)}
-        
-        OPTION 2: INTERNAL TASKS
-        If asking about "Tasks", "Schedule", "People", return {{"url": "INTERNAL_TASKS", "reason": "Task request", "category": "Tasks"}}
-        
-        INSTRUCTION:
-        If the Current Question is vague (e.g., "How much more?", "What about that?"), use the CONTEXT to decide which sheet relates to the previous topic.
-        
-        Return JSON.
-        """
-        
-        try:
-            router_response = model.generate_content(router_prompt)
-            clean_json = router_response.text.strip().replace("```json", "").replace("```", "")
-            decision = json.loads(clean_json)
+        # --- PATH A: PROJECT DETECTED (MULTI-SHEET MODE) ---
+        if detected_project:
+            status_text = f"Found Project: **{detected_project}**. Gathering all related sheets..."
+            st.toast(status_text)
             
-            target_url = decision.get("url")
+            # Gather URLs for the Project + The Master Inventory
+            target_urls = []
             
-            if target_url == "INTERNAL_TASKS":
-                sheet_data = read_master_task_tabs()
-                final_prompt = f"""
-                You are a helpful assistant. 
-                DO NOT WRITE PYTHON CODE.
-                
-                CONTEXT:
-                {chat_context}
-                
-                DATA (Internal Tasks):
-                {sheet_data}
-                
-                QUESTION: {prompt}
-                """
+            # Get Project Specific Sheets (Manuf, Price, DXF)
+            for row in project_map:
+                if row['Project Name'] == detected_project:
+                    target_urls.append({"url": row['Raw Link'], "name": f"{detected_project} - {row['Category']}"})
+            
+            # Get Master Inventory (Always useful for estimation)
+            for row in project_map:
+                if row['Project Name'] == INVENTORY_PROJECT_NAME:
+                    target_urls.append({"url": row['Raw Link'], "name": "Master Inventory"})
+
+            # Read ALL gathered data
+            mega_context = ""
+            for target in target_urls:
+                if target['url']:
+                    data = read_target_sheet(target['url'], target['name'])
+                    mega_context += f"\n\n=== FILE: {target['name']} ===\n{data}"
+            
+            # Advanced Estimation Prompt
+            final_prompt = f"""
+            You are an expert Production Estimator.
+            
+            USER QUESTION: "{prompt}"
+            
+            CONTEXT FROM PREVIOUS CHAT:
+            {chat_context}
+            
+            DATA SOURCES (I have loaded the Stock, Manufacturing, and Pricing sheets for this project):
+            {mega_context}
+            
+            INSTRUCTIONS FOR ESTIMATION:
+            1. Look at the 'Manufacturing/Room Schedule' data to see how many items are COMPLETE vs TOTAL. Calculate the % complete.
+            2. Look at the 'Inventory/Project Overview' data to see how much wood has been USED SO FAR.
+            3. LOGIC: If we used X wood to build Y% of the project, calculate how much wood is needed for the remaining (100-Y)%.
+               - Example: "If 47 sheets built 50% of the job, we likely need another 47 sheets."
+            4. Look at 'DXF' data if available to weight the estimate (e.g. Kitchens use more wood than Beds).
+            5. Compare this Requirement vs Current Stock.
+            
+            Your goal is to give a calculated estimate of *Remaining Material Needed*. Show your math.
+            """
+            
+            try:
                 final_answer = model.generate_content(final_prompt).text
+            except Exception as e:
+                final_answer = f"Error generating estimation: {e}"
 
-            elif target_url and target_url != "None":
-                sheet_data, sheet_name = read_target_sheet(target_url)
-                if sheet_data:
-                    final_prompt = f"""
-                    You are a helpful assistant.
-                    
-                    INSTRUCTIONS:
-                    1. Read the spreadsheet data below.
-                    2. DO NOT write python code.
-                    3. If the user asks for a calculation (e.g., "Do we have enough?"), YOU MUST DO THE MATH YOURSELF based on the numbers provided in the text.
-                       - Compare 'Stock Counts' vs 'Project Requirements'.
-                    4. Use the CONTEXT below to understand vague follow-up questions.
-                    
-                    CONTEXT (Previous Chat):
-                    {chat_context}
-                    
-                    DATA (From '{sheet_name}'):
-                    {sheet_data}
-                    
-                    QUESTION: {prompt}
-                    """
-                    final_answer = model.generate_content(final_prompt).text
+        # --- PATH B: NO PROJECT DETECTED (STANDARD ROUTING) ---
+        else:
+            # Fallback to standard router
+            router_prompt = f"""
+            You are a Routing Assistant. 
+            CONTEXT: {chat_context}
+            QUESTION: "{prompt}"
+            
+            OPTION 1: EXTERNAL SHEETS
+            {json.dumps(project_map)}
+            
+            OPTION 2: INTERNAL TASKS
+            If asking about "Tasks", "Schedule", "People", return {{"url": "INTERNAL_TASKS", "reason": "Task request", "category": "Tasks"}}
+            
+            Return JSON.
+            """
+            try:
+                router_response = model.generate_content(router_prompt)
+                clean_json = router_response.text.strip().replace("```json", "").replace("```", "")
+                decision = json.loads(clean_json)
+                target_url = decision.get("url")
+
+                if target_url == "INTERNAL_TASKS":
+                    sheet_data = read_master_task_tabs()
+                    final_answer = model.generate_content(f"Answer using Tasks:\n{sheet_data}\nQuestion: {prompt}").text
+                elif target_url and target_url != "None":
+                    sheet_data = read_target_sheet(target_url, "Selected Sheet")
+                    final_answer = model.generate_content(f"Answer using Data:\n{sheet_data}\nQuestion: {prompt}\nCite sources!").text
                 else:
-                    final_answer = f"Error opening sheet '{sheet_name}'."
-            else:
-                final_answer = "I couldn't find a relevant sheet. Try mentioning the project or item name again."
-
-        except Exception as e:
-            final_answer = f"System Error: {e}"
+                    final_answer = "I couldn't find a specific project or sheet. Try mentioning the project name exactly (e.g. 'Tudor House')."
+            except Exception as e:
+                final_answer = f"System Error: {e}"
 
         st.chat_message("assistant").markdown(final_answer)
         st.session_state.messages.append({"role": "assistant", "content": final_answer})
