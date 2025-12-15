@@ -88,8 +88,8 @@ def save_message(session_id, role, content):
         print(f"Save failed: {e}")
 
 # --- HELPER FUNCTIONS ---
-def get_project_map():
-    @st.cache_data(ttl=600)  # ttl=600 means "remember this for 600 seconds (10 mins)"
+
+@st.cache_data(ttl=600)  # <--- FIXED: The decorator sits cleanly on top now
 def get_project_map():
     try:
         sh = client.open_by_url(MASTER_SHEET_URL)
@@ -106,8 +106,8 @@ def read_target_sheet(url):
             if ws.title in ["Instructions", "Admin"]: continue
             # Get data as list of lists (cleaner than value objects)
             raw_data = ws.get_all_values()
-            # Read first 100 rows to ensure we catch the item
-            truncated_data = raw_data[:100]
+            # Read first 500 rows to ensure we catch the item (Increased limit)
+            truncated_data = raw_data[:500]
             tab_text = f"--- TAB: '{ws.title}' ---\n{str(truncated_data)}\n"
             all_content.append(tab_text)
         return "\n".join(all_content), sh.title
@@ -212,16 +212,16 @@ if prompt := st.chat_input("Ask about projects, prices, or tasks..."):
             elif target_url and target_url != "None":
                 sheet_data, sheet_name = read_target_sheet(target_url)
                 if sheet_data:
-                    # --- PROMPT UPDATE 2: FORBID PYTHON CODE ---
+                    # --- PROMPT UPDATE 2: FORBID PYTHON CODE + CITATIONS ---
                     final_prompt = f"""
                     You are a helpful assistant.
                     DO NOT WRITE PYTHON CODE. 
                     The data below is raw text from a spreadsheet.
                     Scan the text visually, find the item matching the user's request, and extract the answer.
                     
-CRITICAL INSTRUCTION:
-After giving the answer, you MUST cite your source in brackets.
-Example: "The price is £50 (Source: 'Prices' Tab, Row 14)"
+                    CRITICAL INSTRUCTION:
+                    After giving the answer, you MUST cite your source in brackets.
+                    Example: "The price is £50 (Source: 'Prices' Tab, Row 14)"
                     
                     DATA (From '{sheet_name}'):
                     {sheet_data}
